@@ -61,9 +61,47 @@ function getKnex(): Knex {
   return _knex;
 }
 
+export async function ping(): Promise<void> {
+  const k = getKnex();
+  await k.raw("select 1");
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+async function syncByKey(trx: Knex.Transaction, table: string, key: string, rows: any[]) {
+  const desiredKeys = rows.map((r) => r?.[key]).filter((v) => v != null).map((v) => String(v));
+  const desiredSet = new Set(desiredKeys);
+
+  if (desiredKeys.length === 0) {
+    await trx(table).del();
+    return;
+  }
+
+  const existingRows = await trx(table).select([key]);
+  const existingKeys = existingRows.map((r: any) => String(r?.[key]));
+  const toDelete = existingKeys.filter((k) => !desiredSet.has(k));
+  for (const ids of chunk(toDelete, 500)) {
+    await trx(table).whereIn(key, ids).del();
+  }
+
+  for (const batch of chunk(rows, 100)) {
+    await (trx(table).insert(batch) as any).onConflict(key).merge();
+  }
+}
+
 export function getDataDir() {
   // Unused for DB backend; return empty string for compatibility
   return "";
+}
+
+const TABLE_PREFIX = String(process.env.DB_TABLE_PREFIX ?? "scheduler_").trim() || "scheduler_";
+function tableName(base: string) {
+  if (!TABLE_PREFIX) return base;
+  return base.startsWith(TABLE_PREFIX) ? base : `${TABLE_PREFIX}${base}`;
 }
 
 function parseJson<T>(v: any, fallback: T): T {
@@ -98,6 +136,11 @@ function mapEventFromDb(r: any) {
     reminder_sent,
     ...rest
   } = r;
+  const reminderSentMask = (() => {
+    const n = Number(reminder_sent);
+    if (Number.isFinite(n)) return n;
+    return reminder_sent ? 1 : 0;
+  })();
   return {
     ...rest,
     dateType: date_type,
@@ -113,7 +156,8 @@ function mapEventFromDb(r: any) {
     createdAt: created_at,
     categoryDetail: category_detail,
     type: type,
-    reminderSent: !!reminder_sent
+    reminderSentMask,
+    reminderSent: (reminderSentMask & 1) === 1
   };
 }
 
@@ -133,13 +177,20 @@ function mapEventToDb(e: any) {
     categoryDetail,
     type,
     reminderSent,
+    reminderSentMask,
     // Extract unknown properties to prevent inserting them into the DB
+    referToAttachments,
     _participantInput,
     ...rest
   } = e;
 
   // Basic sanitization
   const safeDate = (d: any) => (d === "" ? null : d);
+  const nextReminderSentMask = (() => {
+    const n = Number(reminderSentMask);
+    if (Number.isFinite(n)) return n;
+    return reminderSent ? 1 : 0;
+  })();
   
   return {
     ...rest,
@@ -156,35 +207,22 @@ function mapEventToDb(e: any) {
     created_at: createdAt,
     category_detail: categoryDetail || null,
     type: type || null,
-    reminder_sent: reminderSent ? 1 : 0
+    reminder_sent: nextReminderSentMask
   };
 }
 
 export async function readEvents(): Promise<any[]> {
   const k = getKnex();
-  try {
-    const rows = await k("events").select("*");
-    return rows.map(mapEventFromDb);
-  } catch (err) {
-    console.error("Error reading events:", err);
-    return [];
-  }
+  const rows = await k(tableName("events")).select("*");
+  return rows.map(mapEventFromDb);
 }
 
 export async function writeEvents(events: any[]) {
   const k = getKnex();
   try {
     await k.transaction(async (trx) => {
-      // Warning: This full-replace strategy is dangerous for concurrency.
-      // Ideally, we should switch to insert-on-conflict or per-event upsert.
-      await trx("events").del();
-      if (events.length > 0) {
-        const rows = events.map(mapEventToDb);
-        const chunkSize = 100;
-        for (let i = 0; i < rows.length; i += chunkSize) {
-          await trx("events").insert(rows.slice(i, i + chunkSize));
-        }
-      }
+      const rows = events.map(mapEventToDb);
+      await syncByKey(trx, tableName("events"), "id", rows);
     });
   } catch (err) {
     console.error("Error writing events:", err);
@@ -194,84 +232,76 @@ export async function writeEvents(events: any[]) {
 
 export async function readArchivedEvents(): Promise<any[]> {
   const k = getKnex();
-  try {
-    const rows = await k("events_archive").select("*");
-    return rows.map(mapEventFromDb);
-  } catch (err) {
-    console.error("Error reading archived events:", err);
-    return [];
-  }
+  const rows = await k(tableName("events_archive")).select("*");
+  return rows.map(mapEventFromDb);
 }
 
 export async function writeArchivedEvents(events: any[]) {
   const k = getKnex();
-  await k.transaction(async (trx) => {
-    await trx("events_archive").del();
-    if (events.length > 0) {
+  try {
+    await k.transaction(async (trx) => {
       const rows = events.map(mapEventToDb);
-      const chunkSize = 100;
-      for (let i = 0; i < rows.length; i += chunkSize) {
-        await trx("events_archive").insert(rows.slice(i, i + chunkSize));
-      }
-    }
-  });
+      await syncByKey(trx, tableName("events_archive"), "id", rows);
+    });
+  } catch (err) {
+    console.error("Error writing archived events:", err);
+    throw err;
+  }
 }
 
 export async function readUsers(): Promise<any[]> {
   const k = getKnex();
-  try {
-    const rows = await k("office_users").select("*");
-    return rows.map((r: any) => {
-      const { office_name, ...rest } = r;
-      return { ...rest, officeName: office_name };
-    });
-  } catch (err) {
-    console.error("Error reading users:", err);
-    return [];
-  }
+  const rows = await k(tableName("office_users")).select("*");
+  return rows.map((r: any) => {
+    const { office_name, ...rest } = r;
+    return { ...rest, officeName: office_name };
+  });
 }
 
 export async function writeUsers(users: any[]) {
   const k = getKnex();
-  await k.transaction(async (trx) => {
-    await trx("office_users").del();
-    if (users.length > 0) {
+  try {
+    await k.transaction(async (trx) => {
       const rows = users.map((u: any) => {
         const { officeName, ...rest } = u;
         return { ...rest, office_name: officeName };
       });
-      const chunkSize = 100;
-      for (let i = 0; i < rows.length; i += chunkSize) {
-        await trx("office_users").insert(rows.slice(i, i + chunkSize));
-      }
-    }
-  });
+      await syncByKey(trx, tableName("office_users"), "username", rows);
+    });
+  } catch (err) {
+    console.error("Error writing users:", err);
+    throw err;
+  }
 }
 
 export async function readHolidays(): Promise<Array<{ month: number; day: number; name?: string }>> {
   const k = getKnex();
+  const rows = await k(tableName("holidays")).select(["month", "day", "name"]);
+  return rows;
+}
+
+export async function writeHolidays(holidays: Array<{ month: number; day: number; name?: string }>): Promise<void> {
+  const k = getKnex();
   try {
-    const rows = await k("holidays").select(["month", "day", "name"]);
-    return rows;
+    await k.transaction(async (trx) => {
+      await trx(tableName("holidays")).del();
+      if (holidays.length > 0) {
+        const chunkSize = 100;
+        for (let i = 0; i < holidays.length; i += chunkSize) {
+          await trx(tableName("holidays")).insert(holidays.slice(i, i + chunkSize));
+        }
+      }
+    });
   } catch (err) {
-    console.error("Error reading holidays:", err);
-    return [];
+    console.error("Error writing holidays:", err);
   }
 }
 
 export async function readEmployees(): Promise<any[]> {
   const k = getKnex();
-  try {
-    // Map employee_details columns to expected structure
-    // Expected: { name, officeName, ... }
-    const rows = await k("employee_details").select("*");
-    return rows.map((r: any) => {
-      const { division, ...rest } = r;
-      // Map 'division' from DB to 'officeName' for the app
-      return { ...rest, officeName: division };
-    });
-  } catch (err) {
-    console.error("Error reading employees:", err);
-    return [];
-  }
+  const rows = await k(tableName("employee_details")).select("*");
+  return rows.map((r: any) => {
+    const { division, ...rest } = r;
+    return { ...rest, officeName: division };
+  });
 }

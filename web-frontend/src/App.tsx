@@ -7,6 +7,10 @@ import Calendar from "./pages/Calendar";
 import Offices from "./pages/Offices";
 import AddEventPage from "./pages/AddEventPage";
 import ArchivedEventsPage from "./pages/ArchivedEventsPage";
+import SuperAdminDashboard from "./pages/SuperAdminDashboard";
+import UserManagement from "./pages/UserManagement";
+import EventManagement from "./pages/EventManagement";
+import AdminSettings from "./pages/AdminSettings";
 import ProtectedRoute from "./ProtectedRoute";
 import { clearToken, getToken, getUserFromToken, onAuthChange } from "./auth";
 import LoginModal from "./components/LoginModal";
@@ -124,7 +128,7 @@ function Shell() {
         <Link to="/" style={{ display: "flex", alignItems: "center", gap: isPortrait ? 8 : 12, textDecoration: "none", color: "inherit" }}>
           <img src="/logo.png" alt="DENR" style={{ width: isPortrait ? 28 : 36, height: isPortrait ? 28 : 36, objectFit: "contain" }} />
           <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
-            <span style={{ fontWeight: 700, fontSize: isPortrait ? 16 : 18, lineHeight: 1 }}>{isPortrait ? "DENR" : "DENR Planner"}</span>
+            <span style={{ fontWeight: 700, fontSize: isPortrait ? 16 : 18, lineHeight: 1 }}>{isPortrait ? "DENR" : "DENR-CAR Planner"}</span>
             <span style={{ fontSize: isPortrait ? 10 : 12, color: "rgba(255,255,255,0.8)", marginTop: 2, lineHeight: 1.1 }}>{isPortrait ? "DENR-CAR" : "Department of Environment and Natural Resources - CAR"}</span>
           </span>
         </Link>
@@ -195,9 +199,10 @@ function Shell() {
           {[
             { to: "/office-dashboard", label: "Office Dashboard", short: "Dashboard" },
             { to: "/add-event", label: "Add Event", short: "Add" },
-            { to: "/archived", label: "Archived", short: "Archived" }
+            { to: "/archived", label: "Archived", short: "Archived" },
+            ...(String(user.role || "").includes("ADMIN") ? [{ to: "/admin", label: "Admin Panel", short: "Admin" }] : [])
           ].map((t) => {
-            const active = location.pathname === t.to;
+            const active = location.pathname === t.to || (t.to === "/admin" && location.pathname.startsWith("/admin"));
             return (
               <Link
                 key={t.to}
@@ -260,6 +265,38 @@ function Shell() {
             element={
               <ProtectedRoute>
                 <AddEventPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute role="ADMIN">
+                <SuperAdminDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/users"
+            element={
+              <ProtectedRoute role="ADMIN">
+                <UserManagement />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/events"
+            element={
+              <ProtectedRoute role="ADMIN">
+                <EventManagement />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/settings"
+            element={
+              <ProtectedRoute role="ADMIN">
+                <AdminSettings />
               </ProtectedRoute>
             }
           />

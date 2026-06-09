@@ -1,15 +1,51 @@
-import jwt from "jsonwebtoken";
+import jwt, { type SignOptions, type Secret } from "jsonwebtoken";
 import { Request, Response, NextFunction } from "express";
 
-const secret = process.env.JWT_SECRET || "dev-insecure-secret";
+const secret: Secret = (() => {
+  const configured = process.env.JWT_SECRET;
+  if (configured && configured.trim()) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("JWT_SECRET must be set in production");
+  }
+  return "dev-insecure-secret";
+})();
 
 export function signToken(payload: object) {
-  return jwt.sign(payload, secret, { expiresIn: "24h" });
+  return jwt.sign(payload, secret, { expiresIn: "24h" } as SignOptions);
+}
+
+export function signTokenWithExpiry(payload: object, expiresIn: SignOptions["expiresIn"]) {
+  return jwt.sign(payload, secret, { expiresIn } as SignOptions);
+}
+
+export function verifyToken(token: string): any | null {
+  try {
+    return jwt.verify(token, secret);
+  } catch {
+    return null;
+  }
 }
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "unauthorized" });
+  try {
+    const decoded = jwt.verify(token, secret);
+    (req as any).user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ error: "unauthorized" });
+  }
+}
+
+export function authMiddlewareAllowQuery(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization || "";
+  let token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) {
+    const q = (req.query as any)?.token;
+    if (typeof q === "string" && q.trim()) token = q.trim();
+  }
   if (!token) return res.status(401).json({ error: "unauthorized" });
   try {
     const decoded = jwt.verify(token, secret);

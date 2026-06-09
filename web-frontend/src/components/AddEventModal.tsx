@@ -1,10 +1,37 @@
 import React, { useEffect, useState } from "react";
 import Modal from "./Modal";
-import { api } from "../api";
+import { api, getApiBaseUrl } from "../api";
+import { getToken } from "../auth";
 import EmployeePickerModal from "./EmployeePickerModal";
 
 function normalizeCategory(s: string) {
   return String(s || "").trim().toLowerCase();
+}
+
+type TimeParts = { hour: string; minute: string; ampm: string };
+const DEFAULT_TIME_PARTS: TimeParts = { hour: "", minute: "00", ampm: "AM" };
+const REFER_TO_ATTACHMENTS_TEXT = "Refer to attachments.";
+function parseTimeToParts(time24: any): TimeParts {
+  const s = String(time24 ?? "").trim();
+  const m = /^(\d{2}):(\d{2})$/.exec(s);
+  if (!m) return DEFAULT_TIME_PARTS;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return DEFAULT_TIME_PARTS;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return DEFAULT_TIME_PARTS;
+  const ampm = hh >= 12 ? "PM" : "AM";
+  const h12 = hh % 12 === 0 ? 12 : hh % 12;
+  return { hour: String(h12).padStart(2, "0"), minute: String(mm).padStart(2, "0"), ampm };
+}
+function partsToTime24(parts: TimeParts): string {
+  const h = Number(parts.hour);
+  const m = Number(parts.minute);
+  const ap = String(parts.ampm || "").toUpperCase();
+  if (!Number.isInteger(h) || h < 1 || h > 12) return "";
+  if (!Number.isInteger(m) || m < 0 || m > 59) return "";
+  if (ap !== "AM" && ap !== "PM") return "";
+  const hh = ap === "AM" ? (h === 12 ? 0 : h) : (h === 12 ? 12 : h + 12);
+  return `${String(hh).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
 export default function AddEventModal({
@@ -79,10 +106,11 @@ export default function AddEventModal({
   const [state, setState] = useState<any>({
     category: "",
     categoryDetail: "",
-    type: "",
+    type: "Internal",
     title: "",
     description: "",
     location: "",
+    referToAttachments: false,
     dateType: (defaultDateType ?? "single"),
     date: defaultDate,
     startDate: (defaultStartDate ?? defaultDate),
@@ -94,13 +122,22 @@ export default function AddEventModal({
     attachments: [],
     _participantInput: ""
   });
+  const [startTimeParts, setStartTimeParts] = useState<TimeParts>(() => parseTimeToParts(""));
+  const [endTimeParts, setEndTimeParts] = useState<TimeParts>(() => parseTimeToParts(""));
   const isEdit = (mode ?? "add") === "edit";
   const isRange = state.dateType === "range";
   const titleError = String(state.title || "").trim() ? null : "Title is required";
   const categoryError = state.category ? null : "Category is required";
   const typeError = state.type ? null : "Type is required";
+  const dateRequiredError = !isRange && !String(state.date || "").trim() ? "Date is required" : null;
+  const startDateRequiredError = isRange && !String(state.startDate || "").trim() ? "Start date is required" : null;
+  const endDateRequiredError = isRange && !String(state.endDate || "").trim() ? "End date is required" : null;
   const dateRangeError = isRange && state.startDate && state.endDate && state.endDate < state.startDate ? "End date must be on or after start date" : null;
+  const startTimeRequiredError = !String(state.startTime || "").trim() ? "Start time is required" : null;
+  const endTimeRequiredError = !String(state.endTime || "").trim() ? "End time is required" : null;
   const timeRangeError = state.startTime && state.endTime && state.endTime <= state.startTime ? "End time must be after start time" : null;
+  const participantsError =
+    Array.isArray(state.participants) && state.participants.length > 0 ? null : "Participants is required";
   const today = (() => {
     const d = new Date();
     const y = d.getFullYear();
@@ -118,13 +155,28 @@ export default function AddEventModal({
   const holidaySingleError = state.dateType !== "range" && isHolidayDate(state.date) ? "Selected date is a holiday" : null;
   const startPastError = state.dateType === "range" && state.startDate && state.startDate < today ? "Start date must be today or later" : null;
   // For ranges, holidays will be automatically skipped; do not error on holiday starts/ends
-  const scheduleErrors = [pastSingleError, holidaySingleError, startPastError].filter(Boolean) as string[];
+  const scheduleErrors = [dateRequiredError, startDateRequiredError, endDateRequiredError, pastSingleError, holidaySingleError, startPastError].filter(Boolean) as string[];
   const holidaysNote = state.dateType === "range" ? "Holidays within the range will be excluded" : "";
   const isValidSchedule = scheduleErrors.length === 0 && !dateRangeError;
-  const isValid = !titleError && !categoryError && !typeError && isValidSchedule && !timeRangeError;
+  const isValid =
+    !titleError &&
+    !categoryError &&
+    !typeError &&
+    isValidSchedule &&
+    !startTimeRequiredError &&
+    !endTimeRequiredError &&
+    !timeRangeError &&
+    !participantsError;
   const [employeeModalOffice, setEmployeeModalOffice] = useState<string | null>(null);
   const [employeeChoices, setEmployeeChoices] = useState<string[]>([]);
   const [employeeChecked, setEmployeeChecked] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setStartTimeParts(parseTimeToParts(state.startTime));
+  }, [state.startTime]);
+  useEffect(() => {
+    setEndTimeParts(parseTimeToParts(state.endTime));
+  }, [state.endTime]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -160,6 +212,12 @@ export default function AddEventModal({
       const ev = initialEvent;
       const isR = String(ev?.dateType || "single") === "range";
       let participantsFromEvent: string[] = Array.isArray(ev.participants) ? [...ev.participants] : [];
+      const tokensFromEvent: string[] = Array.isArray(ev.participantTokens) ? ev.participantTokens : [];
+      const referDetails =
+        !!(ev as any).referToAttachments ||
+        String(ev?.description || "").trim().toLowerCase() === REFER_TO_ATTACHMENTS_TEXT.toLowerCase() ||
+        String(ev?.location || "").trim().toLowerCase() === REFER_TO_ATTACHMENTS_TEXT.toLowerCase();
+      const hasReferParticipantToken = tokensFromEvent.some((t) => String(t).trim().toLowerCase() === "refer to attachments");
 
       const formatDateForInput = (isoDate: string) => {
         if (!isoDate) return '';
@@ -182,6 +240,9 @@ export default function AddEventModal({
           participantsFromEvent.push("Division Chiefs");
         }
       }
+      if (hasReferParticipantToken && !participantsFromEvent.includes("Refer to attachments")) {
+        participantsFromEvent.push("Refer to attachments");
+      }
       setState({
         category: ev.category || "meeting",
         categoryDetail: ev.categoryDetail || "",
@@ -189,6 +250,7 @@ export default function AddEventModal({
         title: ev.title || "",
         description: ev.description || "",
         location: ev.location || "",
+        referToAttachments: referDetails,
         dateType: isR ? "range" : "single",
         date: !isR && ev.date ? formatDateForInput(ev.date) : defaultDate,
         startDate: isR && ev.startDate ? formatDateForInput(ev.startDate) : defaultDate,
@@ -204,10 +266,11 @@ export default function AddEventModal({
       setState({
         category: "",
         categoryDetail: "",
-        type: "",
+        type: "Internal",
         title: "",
         description: "",
         location: "",
+        referToAttachments: false,
         dateType: (defaultDateType ?? "single"),
         date: defaultDate,
         startDate: (defaultStartDate ?? defaultDate),
@@ -262,13 +325,22 @@ export default function AddEventModal({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  function fileToBase64(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = (error) => reject(error);
+  async function uploadFile(file: File) {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append("file", file);
+    const response = await fetch(`${getApiBaseUrl()}/api/upload`, {
+      method: "POST",
+      headers: {
+        Authorization: token ? `Bearer ${token}` : ""
+      },
+      body: fd
     });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(err?.message || `Upload failed (${response.status})`);
+    }
+    return response.json();
   }
 
   async function submit(e: React.FormEvent) {
@@ -282,15 +354,10 @@ export default function AddEventModal({
         for (const file of state.attachments) {
           if (file instanceof File) {
             try {
-              const base64Data = await fileToBase64(file);
-              uploadedAttachments.push({
-                name: file.name,
-                type: file.type,
-                size: file.size,
-                blob: base64Data // Use 'blob' field instead of 'url'
-              });
+              const up = await uploadFile(file);
+              uploadedAttachments.push(up);
             } catch (err) {
-              console.error(`Failed to read file ${file.name}:`, err);
+              console.error(`Failed to upload file ${file.name}:`, err);
             }
           } else {
             uploadedAttachments.push(file);
@@ -302,6 +369,11 @@ export default function AddEventModal({
       participants = Array.from(new Set(participants));
       // Capture high-level participant tokens before expansion
       const participantTokens: string[] = [];
+      const referToken = participants.some((p) => String(p).trim().toLowerCase() === "refer to attachments");
+      if (referToken) {
+        participantTokens.push("Refer to attachments");
+        participants = participants.filter((p) => String(p).trim().toLowerCase() !== "refer to attachments");
+      }
       if (participants.includes("Division Chiefs")) {
         participantTokens.push("Division Chiefs");
       }
@@ -317,8 +389,8 @@ export default function AddEventModal({
         categoryDetail: normalizeCategory(state.category) === "others - specified" ? (state.categoryDetail || "") : undefined,
         type: state.type || "Internal",
         title: state.title,
-        description: state.description || "",
-        location: state.location,
+        description: state.referToAttachments ? REFER_TO_ATTACHMENTS_TEXT : (state.description || ""),
+        location: state.referToAttachments ? REFER_TO_ATTACHMENTS_TEXT : state.location,
         dateType: isRange ? "range" as const : "single" as const,
         date: isRange ? "" : state.date,
         startDate: isRange ? (state.startDate || defaultDate) : "",
@@ -349,7 +421,9 @@ export default function AddEventModal({
         )}
         <div style={{ display: "grid", gridTemplateColumns: isPortrait ? "1fr" : "1fr 180px", gap: 8 }}>
           <div>
-            <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Category</label>
+            <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
+              Category <span style={{ color: "var(--error-color)" }}>*</span>
+            </label>
             <select
               style={{
                 width: "100%",
@@ -381,7 +455,9 @@ export default function AddEventModal({
             )}
           </div>
           <div>
-            <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Type</label>
+            <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
+              Type <span style={{ color: "var(--error-color)" }}>*</span>
+            </label>
             <select
               style={{
                 width: "100%",
@@ -409,7 +485,6 @@ export default function AddEventModal({
             {typeError && <div style={{ color: "var(--error-color)", fontSize: 11, marginTop: 2 }}>{typeError}</div>}
           </div>
         </div>
-        <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Details</div>
         {normalizeCategory(state.category) === "others - specified" && (
           <div>
             <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Specify Category</label>
@@ -422,7 +497,9 @@ export default function AddEventModal({
           </div>
         )}
         <div>
-          <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Event Title</label>
+          <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
+            Event Title <span style={{ color: "var(--error-color)" }}>*</span>
+          </label>
           <input
             style={{ width: "100%", boxSizing: "border-box", padding: 8, border: `1px solid ${titleError ? "var(--error-color)" : "var(--border)"}`, borderRadius: 8, background: "var(--card)", fontSize: 13 }}
             placeholder="Title"
@@ -432,27 +509,58 @@ export default function AddEventModal({
           />
           {titleError && <div style={{ color: "var(--error-color)", fontSize: 11, marginTop: 2 }}>{titleError}</div>}
         </div>
-        <div>
-          <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Description</label>
-          <textarea
-            rows={2}
-            style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }}
-            placeholder="What is this event about?"
-            value={state.description}
-            onChange={(e) => setState({ ...state, description: e.target.value })}
-          />
+        <div style={{ padding: 10, border: "1px solid var(--border)", borderRadius: 12, background: "var(--secondary-bg)" }}>
+          <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>Details</div>
+          <div style={{ display: "grid", gridTemplateColumns: isPortrait ? "1fr" : "1fr 1fr", gap: 10 }}>
+            <div>
+              <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Description</label>
+              <textarea
+                rows={2}
+                style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }}
+                placeholder="What is this event about?"
+                value={state.description}
+                disabled={!!state.referToAttachments}
+                onChange={(e) => setState({ ...state, description: e.target.value })}
+              />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Location</label>
+              <input
+                style={{ width: "100%", boxSizing: "border-box", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }}
+                placeholder="Venue or meeting link"
+                value={state.location}
+                disabled={!!state.referToAttachments}
+                onChange={(e) => setState({ ...state, location: e.target.value })}
+              />
+            </div>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, fontSize: 13, fontWeight: 600 }}>
+            <input
+              type="checkbox"
+              checked={!!state.referToAttachments}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                const desc = String(state.description || "").trim();
+                const loc = String(state.location || "").trim();
+                if (checked) {
+                  setState({ ...state, referToAttachments: true, description: REFER_TO_ATTACHMENTS_TEXT, location: REFER_TO_ATTACHMENTS_TEXT });
+                  return;
+                }
+                setState({
+                  ...state,
+                  referToAttachments: false,
+                  description: desc.toLowerCase() === REFER_TO_ATTACHMENTS_TEXT.toLowerCase() ? "" : state.description,
+                  location: loc.toLowerCase() === REFER_TO_ATTACHMENTS_TEXT.toLowerCase() ? "" : state.location
+                });
+              }}
+            />
+            Refer to attachments
+          </label>
         </div>
         <div>
-          <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Location</label>
-          <input
-            style={{ width: "100%", boxSizing: "border-box", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }}
-            placeholder="Venue or meeting link"
-            value={state.location}
-            onChange={(e) => setState({ ...state, location: e.target.value })}
-          />
-        </div>
-        <div>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Schedule</div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>
+            Schedule <span style={{ color: "var(--error-color)" }}>*</span>
+          </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 4 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 13 }}>
               <input
@@ -474,21 +582,25 @@ export default function AddEventModal({
           {state.dateType === "range" ? (
             <div style={{ display: "grid", gridTemplateColumns: isPortrait ? "1fr" : "1fr 1fr", gap: 10 }}>
               <div>
-                <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Start Date</label>
+                <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
+                  Start Date <span style={{ color: "var(--error-color)" }}>*</span>
+                </label>
                 <input
                   type="date"
-                  style={{ width: "100%", boxSizing: "border-box", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }}
+                  style={{ width: "100%", boxSizing: "border-box", padding: 8, border: `1px solid ${startDateRequiredError || startPastError ? "var(--error-color)" : "var(--border)"}`, borderRadius: 8, background: "var(--card)", fontSize: 13 }}
                   min={today}
                   value={state.startDate}
                   onChange={(e) => setState({ ...state, startDate: e.target.value })}
                 />
               </div>
               <div>
-                <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>End Date</label>
+                <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
+                  End Date <span style={{ color: "var(--error-color)" }}>*</span>
+                </label>
                 <input
                   type="date"
                   min={state.startDate || undefined}
-                  style={{ width: "100%", boxSizing: "border-box", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }}
+                  style={{ width: "100%", boxSizing: "border-box", padding: 8, border: `1px solid ${endDateRequiredError || dateRangeError ? "var(--error-color)" : "var(--border)"}`, borderRadius: 8, background: "var(--card)", fontSize: 13 }}
                   value={state.endDate}
                   onChange={(e) => setState({ ...state, endDate: e.target.value })}
                 />
@@ -496,10 +608,12 @@ export default function AddEventModal({
             </div>
           ) : (
             <div>
-              <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Date</label>
+              <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
+                Date <span style={{ color: "var(--error-color)" }}>*</span>
+              </label>
               <input
                 type="date"
-                style={{ width: "100%", boxSizing: "border-box", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }}
+                style={{ width: "100%", boxSizing: "border-box", padding: 8, border: `1px solid ${dateRequiredError || scheduleErrors.length > 0 ? "var(--error-color)" : "var(--border)"}`, borderRadius: 8, background: "var(--card)", fontSize: 13 }}
                 min={today}
                 value={state.date}
                 onChange={(e) => setState({ ...state, date: e.target.value })}
@@ -517,20 +631,298 @@ export default function AddEventModal({
         </div>
         <div style={{ display: "grid", gridTemplateColumns: isPortrait ? "1fr" : "1fr 1fr", gap: 10 }}>
           <div>
-            <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Start Time</label>
-            <input type="time" style={{ width: "100%", boxSizing: "border-box", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }} value={state.startTime} onChange={(e) => setState({ ...state, startTime: e.target.value })} />
+            <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
+              Start Time <span style={{ color: "var(--error-color)" }}>*</span>
+            </label>
+            <div style={{ display: "grid", gridTemplateColumns: "64px 14px 64px 80px", gap: 6, marginBottom: 4, color: "var(--muted)", fontSize: 11 }}>
+              <div style={{ textAlign: "center" }}>Hour</div>
+              <div />
+              <div style={{ textAlign: "center" }}>Minute</div>
+              <div style={{ textAlign: "center" }}>AM/PM</div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "8px 10px",
+                borderRadius: 12,
+                border: `1px solid ${startTimeRequiredError ? "var(--error-color)" : "var(--border)"}`,
+                background: "var(--card)",
+                color: "var(--text)",
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace"
+              }}
+            >
+              <select
+                aria-label="Start time hour"
+                value={startTimeParts.hour}
+                onChange={(e) => {
+                  const hour = e.target.value;
+                  setStartTimeParts((prev) => {
+                    const next = { ...prev, hour };
+                    setState((s: any) => ({ ...s, startTime: partsToTime24(next) }));
+                    return next;
+                  });
+                }}
+                style={{
+                  width: 64,
+                  height: 36,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--secondary-bg)",
+                  color: "inherit",
+                  fontSize: 18,
+                  fontWeight: 800,
+                  padding: "0 8px",
+                  textAlign: "center",
+                  textAlignLast: "center",
+                  appearance: "none",
+                  WebkitAppearance: "none"
+                }}
+              >
+                <option value="">--</option>
+                {Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0")).map((h) => (
+                  <option key={`sh-${h}`} value={h}>{h}</option>
+                ))}
+              </select>
+              <span style={{ fontSize: 18, fontWeight: 900, color: "var(--muted)" }}>:</span>
+              <select
+                aria-label="Start time minute"
+                value={startTimeParts.minute}
+                onChange={(e) => {
+                  const minute = e.target.value;
+                  setStartTimeParts((prev) => {
+                    const next = { ...prev, minute };
+                    setState((s: any) => ({ ...s, startTime: partsToTime24(next) }));
+                    return next;
+                  });
+                }}
+                style={{
+                  width: 64,
+                  height: 36,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--secondary-bg)",
+                  color: "inherit",
+                  fontSize: 18,
+                  fontWeight: 800,
+                  padding: "0 8px",
+                  textAlign: "center",
+                  textAlignLast: "center",
+                  appearance: "none",
+                  WebkitAppearance: "none"
+                }}
+              >
+                <option value="">--</option>
+                {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0")).map((m) => (
+                  <option key={`sm-${m}`} value={m}>{m}</option>
+                ))}
+              </select>
+              <select
+                aria-label="Start time AM or PM"
+                value={startTimeParts.ampm}
+                onChange={(e) => {
+                  const ampm = e.target.value;
+                  setStartTimeParts((prev) => {
+                    const next = { ...prev, ampm };
+                    setState((s: any) => ({ ...s, startTime: partsToTime24(next) }));
+                    return next;
+                  });
+                }}
+                style={{
+                  width: 80,
+                  height: 36,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--secondary-bg)",
+                  color: "inherit",
+                  fontSize: 16,
+                  fontWeight: 800,
+                  padding: "0 8px",
+                  textAlign: "center",
+                  textAlignLast: "center",
+                  appearance: "none",
+                  WebkitAppearance: "none"
+                }}
+              >
+                <option value="">--</option>
+                <option value="AM">AM</option>
+                <option value="PM">PM</option>
+              </select>
+            </div>
           </div>
           <div>
-            <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>End Time</label>
-            <input type="time" style={{ width: "100%", boxSizing: "border-box", padding: 8, border: "1px solid var(--border)", borderRadius: 8, background: "var(--card)", fontSize: 13 }} value={state.endTime} onChange={(e) => setState({ ...state, endTime: e.target.value })} />
+            <label style={{ display: "block", fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>
+              End Time <span style={{ color: "var(--error-color)" }}>*</span>
+            </label>
+            <div style={{ display: "grid", gridTemplateColumns: "64px 14px 64px 80px", gap: 6, marginBottom: 4, color: "var(--muted)", fontSize: 11 }}>
+              <div style={{ textAlign: "center" }}>Hour</div>
+              <div />
+              <div style={{ textAlign: "center" }}>Minute</div>
+              <div style={{ textAlign: "center" }}>AM/PM</div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "8px 10px",
+                borderRadius: 12,
+                border: `1px solid ${endTimeRequiredError || timeRangeError ? "var(--error-color)" : "var(--border)"}`,
+                background: "var(--card)",
+                color: "var(--text)",
+                fontFamily:
+                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace"
+              }}
+            >
+              <select
+                aria-label="End time hour"
+                value={endTimeParts.hour}
+                onChange={(e) => {
+                  const hour = e.target.value;
+                  setEndTimeParts((prev) => {
+                    const next = { ...prev, hour };
+                    setState((s: any) => ({ ...s, endTime: partsToTime24(next) }));
+                    return next;
+                  });
+                }}
+                style={{
+                  width: 64,
+                  height: 36,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--secondary-bg)",
+                  color: "inherit",
+                  fontSize: 18,
+                  fontWeight: 800,
+                  padding: "0 8px",
+                  textAlign: "center",
+                  textAlignLast: "center",
+                  appearance: "none",
+                  WebkitAppearance: "none"
+                }}
+              >
+                <option value="">--</option>
+                {Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0")).map((h) => (
+                  <option key={`eh-${h}`} value={h}>{h}</option>
+                ))}
+              </select>
+              <span style={{ fontSize: 18, fontWeight: 900, color: "var(--muted)" }}>:</span>
+              <select
+                aria-label="End time minute"
+                value={endTimeParts.minute}
+                onChange={(e) => {
+                  const minute = e.target.value;
+                  setEndTimeParts((prev) => {
+                    const next = { ...prev, minute };
+                    setState((s: any) => ({ ...s, endTime: partsToTime24(next) }));
+                    return next;
+                  });
+                }}
+                style={{
+                  width: 64,
+                  height: 36,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--secondary-bg)",
+                  color: "inherit",
+                  fontSize: 18,
+                  fontWeight: 800,
+                  padding: "0 8px",
+                  textAlign: "center",
+                  textAlignLast: "center",
+                  appearance: "none",
+                  WebkitAppearance: "none"
+                }}
+              >
+                <option value="">--</option>
+                {Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0")).map((m) => (
+                  <option key={`em-${m}`} value={m}>{m}</option>
+                ))}
+              </select>
+              <select
+                aria-label="End time AM or PM"
+                value={endTimeParts.ampm}
+                onChange={(e) => {
+                  const ampm = e.target.value;
+                  setEndTimeParts((prev) => {
+                    const next = { ...prev, ampm };
+                    setState((s: any) => ({ ...s, endTime: partsToTime24(next) }));
+                    return next;
+                  });
+                }}
+                style={{
+                  width: 80,
+                  height: 36,
+                  border: "1px solid var(--border)",
+                  borderRadius: 10,
+                  background: "var(--secondary-bg)",
+                  color: "inherit",
+                  fontSize: 16,
+                  fontWeight: 800,
+                  padding: "0 8px",
+                  textAlign: "center",
+                  textAlignLast: "center",
+                  appearance: "none",
+                  WebkitAppearance: "none"
+                }}
+              >
+                <option value="">--</option>
+                <option value="AM">AM</option>
+                <option value="PM">PM</option>
+              </select>
+            </div>
           </div>
         </div>
-        {timeRangeError && <div style={{ color: "var(--error-color)", fontSize: 11, marginTop: -2 }}>{timeRangeError}</div>}
+        {(startTimeRequiredError || endTimeRequiredError || timeRangeError) && (
+          <div style={{ color: "var(--error-color)", fontSize: 11, marginTop: -2 }}>
+            {timeRangeError || startTimeRequiredError || endTimeRequiredError}
+          </div>
+        )}
         <div>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Participants</div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>
+            Participants <span style={{ color: "var(--error-color)" }}>*</span>
+          </div>
+          {participantsError && <div style={{ color: "var(--error-color)", fontSize: 11, marginTop: -2, marginBottom: 6 }}>{participantsError}</div>}
           <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
             {officesData ? (
               <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {(() => {
+                    const g = "Refer to attachments";
+                    const checked = Array.isArray(state.participants) && state.participants.includes(g);
+                    return (
+                      <label key={g} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, fontWeight: 700, maxWidth: "100%" }}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(ev) => {
+                            if (ev.target.checked) {
+                              const next = Array.isArray(state.participants) ? [...state.participants, g] : [g];
+                              setState({
+                                ...state,
+                                participants: next
+                              });
+                            } else {
+                              const next = (state.participants || []).filter((x: string) => x !== g);
+                              setState({
+                                ...state,
+                                participants: next
+                              });
+                            }
+                          }}
+                        />
+                        <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                          <span>{g}</span>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", lineHeight: 1.25 }}>
+                            Select this when there are too many individuals to list—still select the offices these individuals are under.
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })()}
+                </div>
                 <div>
                   <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 2 }}>Top-level Offices</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 3, border: "1px solid var(--border)", borderRadius: 6, padding: 4, maxHeight: 100, overflowY: "auto" }}>
