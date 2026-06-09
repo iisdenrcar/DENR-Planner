@@ -3,6 +3,49 @@ import type { Knex } from "knex";
 
 let _knex: Knex | null = null;
 
+function isTruthy(value?: string) {
+  return /^(1|true|yes|on|required)$/i.test((value || "").trim());
+}
+
+function buildConnectionConfig(client: string, connection: string) {
+  if (!isTruthy(process.env.DATABASE_SSL)) {
+    return connection;
+  }
+
+  const rejectUnauthorized = !/^(0|false|no|off)$/i.test(
+    (process.env.DATABASE_SSL_REJECT_UNAUTHORIZED || "true").trim()
+  );
+  const ssl: Record<string, any> = { rejectUnauthorized };
+  const caBase64 = (process.env.DATABASE_CA_CERT_BASE64 || "").trim();
+
+  if (caBase64) {
+    ssl.ca = Buffer.from(caBase64, "base64").toString("utf-8");
+  }
+
+  if (client === "pg") {
+    return {
+      connectionString: connection,
+      ssl
+    };
+  }
+
+  const url = new URL(connection);
+  const extraOptions: Record<string, string> = {};
+  url.searchParams.forEach((value, key) => {
+    extraOptions[key] = value;
+  });
+
+  return {
+    host: url.hostname,
+    port: Number(url.port || 3306),
+    user: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password),
+    database: url.pathname.replace(/^\//, ""),
+    ...extraOptions,
+    ssl
+  };
+}
+
 function getKnex(): Knex {
   if (_knex) return _knex;
   const client = (process.env.DATABASE_CLIENT || "").trim();
@@ -12,7 +55,7 @@ function getKnex(): Knex {
   }
   _knex = knex({
     client,
-    connection,
+    connection: buildConnectionConfig(client, connection),
     pool: { min: 0, max: 10 }
   });
   return _knex;

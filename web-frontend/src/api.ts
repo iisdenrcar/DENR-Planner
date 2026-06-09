@@ -8,19 +8,21 @@ export class ApiError extends Error {
 }
 
 const getApiBaseUrl = () => {
-  const envUrl = import.meta.env.VITE_API_BASE_URL;
-  const { protocol, hostname } = window.location;
+  const envUrl = import.meta.env.VITE_API_BASE_URL?.trim();
+  const { protocol, hostname, origin } = window.location;
 
-  // If we are accessing via localhost or 127.0.0.1, we can use the env URL if it exists
-  const isLocalAccess = hostname === "localhost" || hostname === "127.0.0.1";
-  
-  if (envUrl && isLocalAccess) {
-    return envUrl;
+  if (envUrl) {
+    return envUrl.replace(/\/+$/, "");
   }
-  
-  // For remote access (via IP address), dynamically build the URL using the current host
-  // and the standard API port (3000)
-  return `${protocol}//${hostname}:3000`;
+
+  const isLocalAccess = hostname === "localhost" || hostname === "127.0.0.1";
+
+  if (isLocalAccess) {
+    return `${protocol}//${hostname}:3000`;
+  }
+
+  // Fall back to same-origin if the app is ever served behind a reverse proxy.
+  return origin;
 };
 
 export const api = {
