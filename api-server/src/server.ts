@@ -1,7 +1,8 @@
 import "dotenv/config";
 import express from "express";
-import type { Request, Response } from "express";
-import cors from "cors";
+import type { Request, Response, NextFunction } from "express";
+import cors, { type CorsRequest } from "cors";
+import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { authMiddleware, authMiddlewareAllowQuery, signToken, signTokenWithExpiry, verifyToken, requireAnyRole, checkUserDisabled } from "./auth.js";
@@ -21,7 +22,6 @@ import {
   pingStorage
 } from "./storage-select.js";
 import { sendEventCreatedEmail, sendReminderEmail, sendTwoFactorCodeEmail } from "./email-service.js";
-import multer from "multer";
 
 const app = express();
 if (process.env.TRUST_PROXY === "true") {
@@ -168,7 +168,7 @@ const corsAllowList = corsOriginsRaw && !corsAllowAll
   ? corsOriginsRaw.split(",").map((s) => s.trim()).filter(Boolean)
   : defaultCorsAllowList;
 app.use(cors({
-  origin: (origin, cb) => {
+  origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
     if (!origin) return cb(null, true);
     if (corsAllowAll) return cb(null, true);
     if (corsAllowList.includes(origin)) return cb(null, true);
@@ -179,7 +179,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-app.get("/api/health", async (_req, res) => {
+app.get("/api/health", async (_req: Request, res: Response) => {
   await pingStorage();
   res.json({ ok: true, at: new Date().toISOString() });
 });
@@ -200,10 +200,10 @@ app.get("/uploads/:filename", authMiddleware, checkUserDisabled, requireAnyRole(
 
 // Configure Multer storage
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
+  destination: function (req: Request, file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) {
     cb(null, uploadDir);
   },
-  filename: function (req, file, cb) {
+  filename: function (req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) {
     const safeOriginal = path.basename(String(file.originalname || "file")).replace(/[^\w.\- ]+/g, "_");
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     cb(null, uniqueSuffix + '-' + safeOriginal);
@@ -232,7 +232,7 @@ const uploadMimeAllowlist = (() => {
 const upload = multer({
   storage: storage,
   limits: { fileSize: maxUploadBytes },
-  fileFilter: (_req, file, cb) => {
+  fileFilter: (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
     const mt = String(file?.mimetype || "").trim().toLowerCase();
     if (mt && uploadMimeAllowlist.includes(mt)) return cb(null, true);
     return cb(new Error("unsupported_file_type"));
@@ -240,7 +240,7 @@ const upload = multer({
 });
 
 // Route to handle file upload
-app.post("/api/upload", authMiddleware, checkUserDisabled, requireAnyRole(["OFFICE", "ADMIN"]), limitUpload, upload.single("file"), (req, res) => {
+app.post("/api/upload", authMiddleware, checkUserDisabled, requireAnyRole(["OFFICE", "ADMIN"]), limitUpload, upload.single("file"), (req: Request, res: Response) => {
   if (!req.file) {
     return res.status(400).json({ error: "No file uploaded" });
   }

@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { authMiddleware, signToken, signTokenWithExpiry, verifyToken, requireAnyRole, checkUserDisabled } from "./auth.js";
@@ -8,7 +9,6 @@ import crypto from "crypto";
 import { DateTime } from "luxon";
 import { readEvents, writeEvents, readArchivedEvents, writeArchivedEvents, readUsers, readHolidays, writeHolidays, readEmployees, getDataDir, pingStorage } from "./storage-select.js";
 import { sendEventCreatedEmail, sendReminderEmail, sendTwoFactorCodeEmail } from "./email-service.js";
-import multer from "multer";
 const app = express();
 if (process.env.TRUST_PROXY === "true") {
     app.set("trust proxy", 1);
