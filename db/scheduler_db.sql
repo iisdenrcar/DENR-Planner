@@ -1110,10 +1110,13 @@ INSERT INTO `events_archive` (`id`, `title`, `category`, `category_detail`, `typ
 
 DROP TABLE IF EXISTS `holidays`;
 CREATE TABLE IF NOT EXISTS `holidays` (
+  `id` int NOT NULL AUTO_INCREMENT,
   `month` int NOT NULL,
   `day` int NOT NULL,
   `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  UNIQUE KEY `name` (`name`)
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `name` (`name`),
+  UNIQUE KEY `unique_month_day` (`month`, `day`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 --
